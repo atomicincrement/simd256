@@ -1,8 +1,38 @@
 #![feature(test)]
 
-// use test::*;
+#![feature(bench_black_box)]
+extern crate test;
 
-// #[bench]
-// fn bench_add_two(b: &mut Bencher) {
-//     b.iter(|| add_two(2));
-// }
+use std::hint::black_box;
+
+use test::Bencher;
+
+use simd256::SimdU256;
+
+#[bench]
+fn bench_mul(b: &mut Bencher) {
+    let x = SimdU256::from(123456789123456789123456789);
+    let y = SimdU256::from(123456789123456789123456789);
+    b.iter(|| black_box(x * y));
+}
+
+#[bench]
+fn bench_div(b: &mut Bencher) {
+    let x = SimdU256::from(123456789123456789123456789);
+    let y = SimdU256::from(123456789123456789123456789);
+    b.iter(|| black_box(x / y));
+}
+
+#[bench]
+fn bench_add(b: &mut Bencher) {
+    let x = SimdU256::from(123456789123456789123456789);
+    let y = SimdU256::from(123456789123456789123456789);
+    b.iter(|| black_box(x + y));
+}
+
+#[bench]
+fn bench_sub(b: &mut Bencher) {
+    let x = SimdU256::from(123456789123456789123456789);
+    let y = SimdU256::from(123456789123456789123456789);
+    b.iter(|| black_box(x - y));
+}

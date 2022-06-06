@@ -126,62 +126,22 @@ impl std::ops::Sub<SimdU256> for SimdU256 {
 impl std::ops::Div<SimdU256> for SimdU256 {
     type Output = SimdU256;
     fn div(self, b: SimdU256) -> Self::Output {
-        let mut res = Self::from(0);
-
-        println!("{:x}/{:x}", self, b);
-        let mut a = self;
-
-        while a >= b {
-            println!("a   ={:x}", a);
-            println!("b   ={:x}", b);
-            let lza = a.leading_zeros();
-            let lzb = b.leading_zeros();
-            println!("lza={}", lza);
-            println!("lzb={}", lzb);
-            // 0x80000000 <= atop,btop <= 0xffffffff
-            let btop = <[u32; 8]>::from(b << lzb >> (256-32))[7];
-            let atop = <[u32; 8]>::from(a << lza >> (256-32))[7];
-            println!("atop={:x}", atop);
-            println!("btop={:x}", btop);
-            let mut z = (((atop as u64) << 31) / (btop as u64)) as u32;
-            let sh = if lzb < lza + 31 {
-                if lza + 31 - lzb >= 32 {
-                    z = 0;
-                } else {
-                    z >>= lza + 31 - lzb;
-                }
-                0
-            } else {
-                lzb - lza - 31
-            };
-            let mut test = b * z << sh;
-            let mut delta = SimdU256::from(z as u128) << sh;
-            println!("z   ={:x}", z);
-            println!("test={:x}", test);
-            println!("delt={:x}", delta);
-    
-            if test < a {
-                // Estimate is too low. Keep adding multiples of b.
-                println!("test < a");
-                while test < a {
-                    test = test + (b << sh);
-                    delta = delta + (SimdU256::from(1) << sh);
-                }
-            } else {
-                // Estimate is too high. Keep subtracting multiples of b.
-                println!("test > a");
-                while test >= a + (b << sh) {
-                    test = test - (b << sh);
-                    delta = delta - (SimdU256::from(1) << sh);
-                }
-            }
-            println!("..test={:x}", test);
-            println!("..delt={:x}", delta);
-            res = res + delta;
-            a = test - a;
-            println!("..a ={:x}", a);
+        if let Some((d, _r)) = div_rem(self, b) {
+            d
+        } else {
+            SimdU256::from([0xffffffff; 8])
         }
-        res
+    }
+}
+
+impl std::ops::Rem<SimdU256> for SimdU256 {
+    type Output = SimdU256;
+    fn rem(self, b: SimdU256) -> Self::Output {
+        if let Some((_d, r)) = div_rem(self, b) {
+            r
+        } else {
+            SimdU256::from([0xffffffff; 8])
+        }
     }
 }
 
@@ -249,24 +209,104 @@ impl std::ops::Shr<u32> for SimdU256 {
     }
 }
 
-pub fn shl64(x: u64x8) -> u64x8 {
+fn shl64(x: u64x8) -> u64x8 {
     use Which::*;
     let zero = u64x8::splat(0);
     simd_swizzle!(x, zero, [First(1), First(2), First(3), First(4), First(5), First(6), First(7), Second(0)])
 }
 
-pub fn carry_prop(t: u64x8) -> u32x8 {
+fn carry_prop(mut t: u64x8) -> u32x8 {
     let sh = u64x8::splat(32);
+    let zero = u64x8::splat(0);
     // TODO: It must be possible to do the carry propogation in O(log(N))
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
-    let t = (t << sh >> sh) + shl64(t >> sh);
+    loop {
+        let upper = t >> sh;
+        if upper.lanes_eq(zero).all() {
+            break;
+        }
+        t = (t << sh >> sh) + shl64(upper);
+    }
     t.cast::<u32>()
 }
+
+fn div_rem(mut a: SimdU256, b: SimdU256) -> Option<(SimdU256, SimdU256)> {
+    if b.is_zero() {
+        return None;
+    }
+    let mut res = SimdU256::from(0);
+
+    // println!("{:x}/{:x}", self, b);
+    while a >= b {
+        // Do long division:
+        //
+        // Make a guess, da for a / b = z * (b << sh)
+        // for some small z and sh.
+        //
+        // Ensure da <= a and subtract da from a
+        // and add z << sh to the result.
+
+        let lza = a.leading_zeros();
+        let lzb = b.leading_zeros();
+
+        // 0x80000000 <= atop,btop <= 0xffffffff
+        let btop = <[u32; 8]>::from(b << lzb)[0];
+        let atop = <[u32; 8]>::from(a << lza)[0];
+
+        let mut z = (((atop as u64) << 31) / (btop as u64)) as u32;
+        let sh = if lzb < lza + 31 {
+            // if sh < 0, we may need to shrink z.
+            if lza + 31 - lzb >= 32 {
+                z = 1;
+            } else {
+                z >>= lza + 31 - lzb;
+            }
+            0
+        } else {
+            lzb - lza - 31
+        };
+
+        let bsh = b << sh;
+        let mut da = bsh * z;
+        let mut dr = SimdU256::from(z as u128) << sh;
+        let onesh = SimdU256::from(1) << sh;
+
+        // println!("z   ={:x}", z);
+        // println!();
+        // println!("a   ={:x}", a);
+        // println!("da  ={:x}", da);
+        // println!();
+        // println!("bsh ={:x}", bsh);
+        // println!("dr  ={:x}", dr);
+        // println!("res ={:x}", res);
+
+        if da < a {
+            // Estimate is too low. Keep adding multiples of b.
+            // println!("da < a");
+            // assert!(da + bsh*4 >= a);
+            while da + bsh <= a {
+                da = da + bsh;
+                dr = dr + onesh;
+            }
+            a = a - da;
+            res = res + dr;
+        } else {
+            // Estimate is too high. Keep subtracting multiples of b.
+            // println!("da > a");
+            // assert!(da - bsh*4 < a);
+
+            while da > a {
+                // println!("!");
+                da = da - bsh;
+                dr = dr - onesh;
+            }
+            a = a - da;
+            res = res + dr;
+        }
+    }
+    Some((res, a))
+}
+
+
 
 impl SimdU256 {
     pub fn to_str_radix(&self, radix:u32) -> String {
@@ -319,89 +359,3 @@ impl std::fmt::UpperHex for SimdU256 {
 
 
 
-#[test]
-fn test_mul_overflow() {
-    let a = u32x8::from_array([0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
-    let b = u32x8::from_array([0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
-    println!("{:08x?}", a);
-    println!("{:08x?}", b);
-    let c = SimdU256(a) * SimdU256(b);
-    println!("{:08x?}", c.0);
-
-    let a = u32x8::from_array([0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
-    let b = u32x8::from_array([0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
-    println!("{:08x?}", a);
-    println!("{:08x?}", b);
-    let c = SimdU256(a) * SimdU256(b);
-    println!("{:08x?}", c.0);
-}
-
-#[test]
-fn test_mul_random() {
-    use num_bigint::BigUint;
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mask = BigUint::from_slice(&[0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
-    let extra = BigUint::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 1]);
-
-    let to_simd = move |b: BigUint| {
-        let mut r = (b & (&mask)).to_u32_digits();
-        while r.len() < 8 {
-            r.push(0);
-        }
-        r.reverse();
-        SimdU256::from(<[u32; 8]>::try_from(&*r).unwrap())
-    };
-
-    for _ in 0..100000 {
-        let lhs = [
-            rng.gen(), rng.gen(), rng.gen(), rng.gen(),
-            rng.gen(), rng.gen(), rng.gen(), rng.gen(),
-        ];
-        let rhs = [
-            rng.gen(), rng.gen(), rng.gen(), rng.gen(),
-            rng.gen(), rng.gen(), rng.gen(), rng.gen(),
-        ];
-        let mut lhsr = lhs;
-        let mut rhsr = rhs;
-        lhsr.reverse();
-        rhsr.reverse();
-        
-        let lhs_uint = BigUint::from_slice(&lhsr);
-        let rhs_uint = BigUint::from_slice(&rhsr);
-        let lhs_simd = SimdU256::from(lhs);
-        let rhs_simd = SimdU256::from(rhs);
-
-        let prod_uint = to_simd(&lhs_uint * &rhs_uint);
-        let prod_simd = lhs_simd * rhs_simd;
-        assert_eq!(prod_uint, prod_simd);
-
-        let prod_uint = to_simd(&lhs_uint * rhs[7]);
-        let prod_simd = lhs_simd * rhs[7];
-        assert_eq!(prod_uint, prod_simd);
-
-        let sum_uint = to_simd(&lhs_uint + &rhs_uint);
-        let sum_simd = lhs_simd + rhs_simd;
-        assert_eq!(sum_uint, sum_simd);
-
-        let diff_uint = to_simd(&extra + &lhs_uint - &rhs_uint);
-        let diff_simd = lhs_simd - rhs_simd;
-        assert_eq!(diff_uint, diff_simd);
-
-        let sh = rng.gen::<u32>() & 255;
-        let shl_uint = to_simd(&lhs_uint << sh);
-        let shl_simd = lhs_simd << sh;
-        assert_eq!(shl_uint, shl_simd);
-
-        let shr_uint = to_simd(&lhs_uint >> sh);
-        let shr_simd = lhs_simd >> sh;
-        assert_eq!(shr_uint, shr_simd);
-
-        assert_eq!((&lhs_uint >> sh).bits() as u32, shr_simd.bits());
-
-        let div_uint = to_simd(&lhs_uint / (&rhs_uint >> 128));
-        let div_simd = lhs_simd / (rhs_simd >> 128);
-        assert_eq!(div_uint, div_simd);
-
-    }
-}
